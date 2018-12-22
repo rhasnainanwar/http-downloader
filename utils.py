@@ -1,5 +1,3 @@
-from urllib.parse import urlparse
-
 import os
 
 '''
@@ -13,15 +11,15 @@ def parse_links(link, dest):
 	:param dest: destination folder to save files to; for duplicate files matching
 	:return: host name, path to source file, and destination file name
 	'''
-	url = urlparse(link)
-	if not url.scheme:
-		link = 'https://'+link # default https scheme
-		url = urlparse(link)
-	host = url.netloc
-	path = url.path
+	host_start = 0
+	if link.find('http') != -1:
+		host_start = link.find('//') + 2
+	host_end = link[host_start:].find('/') + host_start
 
-	if url.scheme == '':
-		host = url.path.split('/')[0] # if scheme is not present, domain comes before first slash '/'
+	host = link[host_start: host_end]
+
+	path = link[host_end:]
+
 	if path == '':
 		path = '/' # request root i.e., index.html by convention
 

@@ -36,7 +36,8 @@ def get_header(host, path):
 			header['response'] = ' '.join(lines[i].split()[1:]) # first line
 			continue
 		field = lines[i].split(': ')
-		header[field[0].strip().lower()] = field[1].strip()
+		if len(field) == 2:
+			header[field[0].strip().lower()] = field[1].strip()
 	soc.close()
 	return header, len(res)
 
@@ -87,7 +88,7 @@ if __name__ == '__main__':
 	requiredArgs.add_argument("-n", "--num", required=True, help="Total number of simultaneous connections", type=int)
 	requiredArgs.add_argument("-i", "--interval", required=True, help="Time interval in seconds between metric reporting", type=int)
 	requiredArgs.add_argument("-c", "--connection", required=True, help="Type of connection: UDP or TCP")
-	requiredArgs.add_argument("-f", "--src", required=True, help="Address pointing to the file location on the web")
+	requiredArgs.add_argument("-s", "--src", required=True, help="Address pointing to the file location on the web")
 	requiredArgs.add_argument("-o", "--dest", required=True, help="Address pointing to the location where the file is downloaded")
 
 	# parse arguments and store in respective variables
@@ -96,7 +97,7 @@ if __name__ == '__main__':
 
 	# get source details from source web link and resolve to destination link
 	host, path, filename = parse_links(args.src, args.dest)
-	#print(host, path, filename)
+	# print(host, path, filename)
 
 	# using abbrevation convention
 	connection_type = args.connection.upper()
@@ -105,10 +106,10 @@ if __name__ == '__main__':
 	header, hlength = get_header(host, path)
 	#print(header)
 	# process header information
-	if header['response'].find('200') is not -1:
-		print('Successfully connected to', socket.gethostbyname(host))
+	if 'response' in header and header['response'].find('200') != -1:
+		print('\nSuccessfully connected to', socket.gethostbyname(host))
 	else:
-		print('Failed! Server replied with error:', header['response'])
+		print('\nFailed! Server replied with error:', header['response'])
 		exit(1)
 
 	clength = math.inf
