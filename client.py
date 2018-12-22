@@ -1,59 +1,80 @@
 import argparse
 import socket
+import ssl
+import time
+import math
+from threading import Thread
+import random
+import string
 
 from utils import *
 
-PORT = 80
+PORT = 443
 
-def udp_download(host, path, dest):
-	soc = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-	soc.connect((host, PORT))
-	request = 'GET '+ path +' HTTP/1.1\r\nHOST: '+ host +'\r\n\r\n' # request header
-	soc.sendall(request.encode())
-
-	with open(dest, 'w') as file_to_write:
-		hdr_rcvd = False # indicator that header is received
-		length = float("inf") # length of message
-		rcvd_length = 0 # data received
-		while True: # start receiving
-			data = soc.recv(2048)
-			if not data:
-				break
-			if not hdr_rcvd:
-				data = data.decode().split('\r\n\r\n')
-				data = ''.join(data[1:])
-				hdr_rcvd = True
-			else:
-				data = data.decode()
-			file_to_write.write(data)
-		file_to_write.close()
-	soc.close()
-
-def tcp_download(host, path, dest):
+def get_header(host, path):
+	'''
+	function to get header information from a request
+	:param host: server domain
+	:param path: path of the source file
+	:return: header as a dict, and length of header in bytes
+	'''
 	soc = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 	soc.connect((host, PORT))
-	request = 'GET '+ path +' HTTP/1.1\r\nHOST: '+ host +'\r\n\r\n' # request header
+
+	soc = ssl.wrap_socket(soc, keyfile=None, certfile=None, server_side=False, cert_reqs=ssl.CERT_NONE, ssl_version=ssl.PROTOCOL_SSLv23)
+
+	request = 'HEAD '+ path +' HTTP/1.1\r\nHOST: '+ host +'\r\n\r\n' # request header
 	soc.sendall(request.encode())
 
-	with open(dest, 'w') as file_to_write:
+	res = soc.recv(1024)
+	res = res.decode()
+	lines = res.split('\r\n')
+
+	header = {}
+	for i in range(len(lines)-2): # -2 for CRLF
+		if i == 0:
+			header['response'] = ' '.join(lines[i].split()[1:]) # first line
+			continue
+		field = lines[i].split(': ')
+		header[field[0].strip().lower()] = field[1].strip()
+	soc.close()
+	return header, len(res)
+
+
+def tcp_download(host, path, start, end, dest):
+	soc = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+	soc.connect((host, PORT))
+
+	soc = ssl.wrap_socket(soc, keyfile=None, certfile=None, server_side=False, cert_reqs=ssl.CERT_NONE, ssl_version=ssl.PROTOCOL_SSLv23)
+
+	if end is not math.inf:
+		request = 'GET '+ path +' HTTP/1.1\r\nHOST: '+ host +'\r\nRange: bytes='+ str(start) +'-'+ str(end) +'\r\n\r\n' # request header
+	else:
+		request = 'GET '+ path +' HTTP/1.1\r\nHOST: '+ host +'\r\n\r\n' # request header
+
+	soc.sendall(request.encode())
+
+	with open(dest, 'wb') as file_to_write:
 		hdr_rcvd = False # indicator that header is received
+		rcvd_lngth = 0 # received data
 		while True:
 			data = soc.recv(2048)
 			if not data:
 				break
 			if not hdr_rcvd:
-				data = data.decode().split('\r\n\r\n')
-				print(data[0])
-				data = ''.join(data[1:])
+				data = data.split(b'\r\n\r\n')[1] # skip header
 				hdr_rcvd = True
 			else:
-				data = data.decode()
+				data = data
 			file_to_write.write(data)
-		file_to_write.close()
+
+			rcvd_lngth += len(data)
+			
+			if rcvd_lngth >= (end - start): break
 	soc.close()
 
 # global dictionary to launch download based on connection type
-connections = {'UDP': udp_download, 'TCP': tcp_download}
+connections = {'TCP': tcp_download}
 
 
 # MAIN
@@ -71,11 +92,64 @@ if __name__ == '__main__':
 
 	# parse arguments and store in respective variables
 	args = parser.parse_args()
+	num_con = args.num # number of simulatenous connections
 
 	# get source details from source web link and resolve to destination link
 	host, path, filename = parse_links(args.src, args.dest)
-	print(host, path, filename)
+	#print(host, path, filename)
+
 	# using abbrevation convention
 	connection_type = args.connection.upper()
-	
-	connections[connection_type](host, path, filename)
+	start_t = time.time()
+
+	header, hlength = get_header(host, path)
+	#print(header)
+	# process header information
+	if header['response'].find('200') is not -1:
+		print('Successfully connected to', socket.gethostbyname(host))
+	else:
+		print('Failed! Server replied with error:', header['response'])
+		exit(1)
+
+	clength = math.inf
+	if 'content-length' in header:
+		clength = int(header['content-length'])
+	else:
+		print('\nServer did not return length of file. Using defaults: single connection')
+		num_con = 1
+
+	if not 'accept-ranges' in header:
+		print('\nServer does not support ranges. Using defaults: single connection')
+		num_con = 1
+
+	print('\nDownloading',filename,'...\n')
+
+	if num_con == 1: # avoid overheads
+		connections[connection_type](host, path, 0, clength, filename)
+		print(time.time() - start_t)
+		exit(0)
+
+	threads = [] # list of threads
+	tmps = [] # list of intermediate files
+	multiple = clength // num_con
+	for i in range(num_con):
+		print('Creating connection #', i+1)
+		tmp_name = '.'+''.join(random.choices(string.ascii_uppercase + string.digits + string.ascii_lowercase, k=15))
+
+		start = i*multiple
+		end = (i+1)*multiple-1
+		if i == num_con - 1:
+			end = clength
+
+		threads.append( Thread(target=connections[connection_type], args=(host, path, start, end, tmp_name)) )
+		threads[-1].start()
+		tmps.append(tmp_name)
+
+	for i in range(num_con):
+		threads[i].join()
+
+	print('\nDownload Completed!\n')
+	print(time.time() - start_t, 'sec')
+
+	print('\nCombining chunks...')
+	join_chunks(tmps, filename)
