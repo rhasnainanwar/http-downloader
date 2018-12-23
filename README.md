@@ -1,7 +1,7 @@
 # HTTP Downloader
-```**usage: client.py [-h] [-r] -n NUM -i INTERVAL -c CONNECTION -f SRC -o DEST**
+**usage: client.py [-h] [-r] -n NUM -i INTERVAL -c CONNECTION -f SRC -o DEST**
 
-optional arguments:
+```optional arguments:
   -h, --help            show this help message and exit
   -r, --resume          Whether to resume the existing download in progress
 
