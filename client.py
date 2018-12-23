@@ -2,7 +2,6 @@ import argparse
 import socket
 import ssl
 import time
-import math
 from threading import Thread
 import random
 import string
@@ -16,7 +15,7 @@ def get_header(host, path):
 	function to get header information from a request
 	:param host: server domain
 	:param path: path of the source file
-	:return: header as a dict, and length of header in bytes
+	:return: header as a dict
 	'''
 	soc = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 	soc.connect((host, PORT))
@@ -39,39 +38,44 @@ def get_header(host, path):
 		if len(field) == 2:
 			header[field[0].strip().lower()] = field[1].strip()
 	soc.close()
-	return header, len(res)
+	return header
 
 
-def tcp_download(host, path, start, end, dest):
+def tcp_download(host, path, start, end, dest, resume):
+	if start >= end:
+		return
 	soc = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 	soc.connect((host, PORT))
 
 	soc = ssl.wrap_socket(soc, keyfile=None, certfile=None, server_side=False, cert_reqs=ssl.CERT_NONE, ssl_version=ssl.PROTOCOL_SSLv23)
 
-	if end is not math.inf:
+	if end is not -1:
 		request = 'GET '+ path +' HTTP/1.1\r\nHOST: '+ host +'\r\nRange: bytes='+ str(start) +'-'+ str(end) +'\r\n\r\n' # request header
 	else:
 		request = 'GET '+ path +' HTTP/1.1\r\nHOST: '+ host +'\r\n\r\n' # request header
 
 	soc.sendall(request.encode())
 
-	with open(dest, 'wb') as file_to_write:
-		hdr_rcvd = False # indicator that header is received
-		rcvd_lngth = 0 # received data
-		while True:
-			data = soc.recv(2048)
-			if not data:
-				break
-			if not hdr_rcvd:
-				data = data.split(b'\r\n\r\n')[1] # skip header
-				hdr_rcvd = True
-			else:
-				data = data
-			file_to_write.write(data)
+	if resume:
+		file_to_write = open(dest, 'ab')
+	else:
+		file_to_write = open(dest, 'wb')
+	hdr_rcvd = False # indicator that header is received
+	rcvd_lngth = 0 # received data
+	while True:
+		data = soc.recv(2048)
+		if not data:
+			break
+		if not hdr_rcvd:
+			data = data.split(b'\r\n\r\n')[1] # skip header
+			hdr_rcvd = True
+		else:
+			data = data
+		file_to_write.write(data)
 
-			rcvd_lngth += len(data)
-			
-			if rcvd_lngth >= (end - start): break
+		rcvd_lngth += len(data)
+		
+		if rcvd_lngth >= (end - start): break
 	soc.close()
 
 # global dictionary to launch download based on connection type
@@ -96,23 +100,22 @@ if __name__ == '__main__':
 	num_con = args.num # number of simulatenous connections
 
 	# get source details from source web link and resolve to destination link
-	host, path, filename = parse_links(args.src, args.dest)
-	# print(host, path, filename)
+	host, path, filename = parse_links(args.src, args.dest, args.resume)
 
 	# using abbrevation convention
 	connection_type = args.connection.upper()
 	start_t = time.time()
 
-	header, hlength = get_header(host, path)
-	#print(header)
-	# process header information
+	header = get_header(host, path)
+
+	# process HEADER information
 	if 'response' in header and header['response'].find('200') != -1:
 		print('\nSuccessfully connected to', socket.gethostbyname(host))
 	else:
 		print('\nFailed! Server replied with error:', header['response'])
 		exit(1)
 
-	clength = math.inf
+	clength = -1
 	if 'content-length' in header:
 		clength = int(header['content-length'])
 	else:
@@ -123,34 +126,89 @@ if __name__ == '__main__':
 		print('\nServer does not support ranges. Using defaults: single connection')
 		num_con = 1
 
-	print('\nDownloading',filename,'...\n')
+
+	# RESUME
+
+	temporary_name = os.path.join(args.dest, '.'+filename.split('/')[-1]+'.tmp')
+	if num_con == 1:
+		temporary_name = filename
+
+	intermediate_names = [] # files to hold data from each thread
+
+	resumeable = False # flag to indicate if download is to be resumed
+	if args.resume and 'accept-ranges' in header:
+		resumeable, intermediate_names, ending_bytes = check_resume(temporary_name)
+
+	if resumeable and intermediate_names: # single connection has no intermediates
+		num_con = len(intermediate_names)
+		print('Using',num_con,'connections for resuming...')
+	elif args.resume and not resumeable:
+		print('Resuming not possible.\n')
+
+	# begin DOWNLOADING
+	if resumeable: prefix = 'Resuming'
+	else: prefix = 'Downloading'
+	print('\n'+prefix, filename,'...\n')
 
 	if num_con == 1: # avoid overheads
-		connections[connection_type](host, path, 0, clength, filename)
+		if resumeable: # resumable already implies that server supports ranges
+			start = os.stat(filename).st_size
+		else:
+			start = 0
+		connections[connection_type](host, path, start, clength, filename, resumeable)
 		print(time.time() - start_t)
 		exit(0)
 
+	# if more than one connections
+
+	# THREADING
 	threads = [] # list of threads
-	tmps = [] # list of intermediate files
-	multiple = clength // num_con
+	multiple = clength // num_con # approx size of each chunk
+	intermediate_data = []
 	for i in range(num_con):
 		print('Creating connection #', i+1)
-		tmp_name = '.'+''.join(random.choices(string.ascii_uppercase + string.digits + string.ascii_lowercase, k=15))
 
-		start = i*multiple
-		end = (i+1)*multiple-1
-		if i == num_con - 1:
-			end = clength
+		if not resumeable: # because otherwise we already have the names
+			tmp_name = ''.join(random.choices(string.ascii_uppercase + string.digits + string.ascii_lowercase, k=10))
+			tmp_name = os.path.join(args.dest, '.'+tmp_name)
+			# range calculation
+			start = i*multiple
+			end = (i+1)*multiple-1
+			if i == num_con - 1:
+				end = clength
 
-		threads.append( Thread(target=connections[connection_type], args=(host, path, start, end, tmp_name)) )
+			intermediate_names.append(tmp_name)
+
+			intermediate_data.append(tmp_name+','+str(end))
+		else:
+			tmp_name = intermediate_names[i]
+
+			if i is not 0:
+				start = ending_bytes[i-1] + 1 # get start from previous' end
+			else:
+				start = 0
+			start += os.stat(tmp_name).st_size # recovery size
+
+			end = ending_bytes[i]
+
+		threads.append( Thread(target=connections[connection_type], args=(host, path, start, end, tmp_name, resumeable)) )
 		threads[-1].start()
-		tmps.append(tmp_name)
 
+	if not resumeable:
+		with open(temporary_name, 'w') as temp:
+			for name in intermediate_data:
+				temp.write(name+'\n')
+
+	# wait for threads to finish
 	for i in range(num_con):
 		threads[i].join()
 
-	print('\nDownload Completed!\n')
+	print('\nDownload Completed!')
 	print(time.time() - start_t, 'sec')
 
 	print('\nCombining chunks...')
-	join_chunks(tmps, filename)
+	join_chunks(intermediate_names, filename)
+	print(filename, 'saved!')
+
+	if temporary_name[-4:] == '.tmp':
+		os.remove(temporary_name)
