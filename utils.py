@@ -38,6 +38,11 @@ def parse_links(link, dest, resume):
 
 
 def check_resume(src):
+	'''
+	function for checking resuming feasibility by checking if all files exist
+	:param src: tmp intermedate file name which has data about other files
+	'''
+
 	print('\nChecking files for resuming...')
 	resumeable = False
 	intermediates = []
@@ -65,6 +70,11 @@ def check_resume(src):
 	return resumeable, intermediates, ending_bytes
 
 def join_chunks(files, filename):
+	'''
+	function for combining files into a single output and delete temporary files
+	:param files: list of intermediate file names
+	:param filename: output file name
+	'''
 	with open(filename, 'wb') as dest:
 		for line in files:
 			file = line.split(',')[0]

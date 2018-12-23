@@ -2,7 +2,7 @@ import argparse
 import socket
 import ssl
 import time
-from threading import Thread
+from threading import Thread, Timer
 import random
 import string
 
@@ -18,7 +18,7 @@ def get_header(host, path):
 	:return: header as a dict
 	'''
 	soc = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-	soc.connect((host, PORT))
+	soc.connect((host, 443))
 
 	soc = ssl.wrap_socket(soc, keyfile=None, certfile=None, server_side=False, cert_reqs=ssl.CERT_NONE, ssl_version=ssl.PROTOCOL_SSLv23)
 
@@ -41,9 +41,66 @@ def get_header(host, path):
 	return header
 
 
-def tcp_download(host, path, start, end, dest, resume):
+def udp_download(host, path, start, end, dest, resume, id):
+	'''
+	function to download data in a file using UDP
+	:param host: server domain
+	:param path: path of the source file
+	:param start: starting data byte
+	:param ending: starting data byte
+	:param dest: output file name
+	:param resume: boolean flag indicating if user has requested resume
+	:param id: connection number
+	'''
 	if start >= end:
 		return
+	soc = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+	soc.connect((host, PORT))
+
+	if end is not -1:
+		request = 'GET '+ path +' HTTP/1.1\r\nHOST: '+ host +'\r\nRange: bytes='+ str(start) +'-'+ str(end) +'\r\n\r\n' # request header
+	else:
+		request = 'GET '+ path +' HTTP/1.1\r\nHOST: '+ host +'\r\n\r\n' # request header
+
+	soc.sendall(request.encode())
+
+	if resume:
+		file_to_write = open(dest, 'ab')
+	else:
+		file_to_write = open(dest, 'wb')
+	hdr_rcvd = False # indicator that header is received
+	rcvd_lngth = 0 # received data
+	while True:
+		data = soc.recv(1400)
+		if not data:
+			break
+		if not hdr_rcvd:
+			data = data.split(b'\r\n\r\n')[1] # skip header
+			hdr_rcvd = True
+		else:
+			data = data
+		file_to_write.write(data)
+
+		rcvd_lngth += len(data)
+		
+		if rcvd_lngth >= (end - start): break
+	soc.close()
+
+
+def tcp_download(host, path, start, end, dest, resume, id):
+	'''
+	function to download data in a file using TCP
+	:param host: server domain
+	:param path: path of the source file
+	:param start: starting data byte
+	:param ending: starting data byte
+	:param dest: output file name
+	:param resume: boolean flag indicating if user has requested resume
+	:param id: connection number
+	'''
+	if start >= end:
+		return
+	total[id] = end-start+1
 	soc = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 	soc.connect((host, PORT))
 
@@ -62,6 +119,7 @@ def tcp_download(host, path, start, end, dest, resume):
 		file_to_write = open(dest, 'wb')
 	hdr_rcvd = False # indicator that header is received
 	rcvd_lngth = 0 # received data
+
 	while True:
 		data = soc.recv(2048)
 		if not data:
@@ -74,13 +132,37 @@ def tcp_download(host, path, start, end, dest, resume):
 		file_to_write.write(data)
 
 		rcvd_lngth += len(data)
-		
-		if rcvd_lngth >= (end - start): break
+		downloaded[id] = rcvd_lngth
+		if rcvd_lngth >= (end - start + 1): break
 	soc.close()
 
 # global dictionary to launch download based on connection type
-connections = {'TCP': tcp_download}
+connections = {'TCP': tcp_download, 'UDP': udp_download}
 
+def print_stats(interval, target, start):
+	'''
+	function for printing downloading stats
+	:param interval: interval in secs after which to print stats
+	:param target: target number of bytes of whole download
+	:param start: download starting time
+	'''
+	whole = 0
+	finished = [False]*len(total)
+	while True:
+		time.sleep(interval)
+		for i in range(len(total)):
+			if finished[i]:
+				continue
+			if downloaded[i] >= total[i]:
+				downloaded[i] = total[i] # better aesthetics by ignoring extra data
+				finished[i] = True
+			print('Connection ', str(i+1)+':', str(downloaded[i])+'/'+str(total[i])+', download speed: ', downloaded[i]/((time.time() - start)*1000), 'kb/s')
+			whole += downloaded[i]
+		if whole > target: whole = target # better aesthetics by ignoring extra data
+		print('Total: ' + str(whole)+'/'+str(target),', download speed: ', whole/((time.time() - start)*1000), 'kb/s')
+		print()
+		if sum(finished) == len(finished) or whole >= target:
+			break
 
 # MAIN
 if __name__ == '__main__':
@@ -150,13 +232,21 @@ if __name__ == '__main__':
 	else: prefix = 'Downloading'
 	print('\n'+prefix, filename,'...\n')
 
+	global downloaded, total
+	downloaded = [0]*num_con
+	total = [0]*num_con
+
+	t = Thread(target=print_stats, args=(args.interval,clength, start_t))
+	t.start()
+
 	if num_con == 1: # avoid overheads
 		if resumeable: # resumable already implies that server supports ranges
 			start = os.stat(filename).st_size
 		else:
 			start = 0
-		connections[connection_type](host, path, start, clength, filename, resumeable)
-		print(time.time() - start_t)
+		connections[connection_type](host, path, start, clength, filename, resumeable, 0)
+		time.sleep(1) # for printing synchronization
+		print('\nDownload Completed!')
 		exit(0)
 
 	# if more than one connections
@@ -165,6 +255,7 @@ if __name__ == '__main__':
 	threads = [] # list of threads
 	multiple = clength // num_con # approx size of each chunk
 	intermediate_data = []
+
 	for i in range(num_con):
 		print('Creating connection #', i+1)
 
@@ -191,24 +282,22 @@ if __name__ == '__main__':
 
 			end = ending_bytes[i]
 
-		threads.append( Thread(target=connections[connection_type], args=(host, path, start, end, tmp_name, resumeable)) )
+		threads.append( Thread(target=connections[connection_type], args=(host, path, start, end, tmp_name, resumeable, i)) )
 		threads[-1].start()
-
+	print()
 	if not resumeable:
 		with open(temporary_name, 'w') as temp:
 			for name in intermediate_data:
 				temp.write(name+'\n')
 
 	# wait for threads to finish
-	for i in range(num_con):
-		threads[i].join()
+	for thread in threads:
+		thread.join()
 
+	time.sleep(1) # for printing synchronization
 	print('\nDownload Completed!')
-	print(time.time() - start_t, 'sec')
-
 	print('\nCombining chunks...')
 	join_chunks(intermediate_names, filename)
-	print(filename, 'saved!')
-
 	if temporary_name[-4:] == '.tmp':
 		os.remove(temporary_name)
+	print(filename, 'saved!')
