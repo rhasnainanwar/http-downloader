@@ -1,5 +1,5 @@
 # HTTP Downloader
-``*usage: client.py [-h] [-r] -n NUM -i INTERVAL -c CONNECTION -f SRC -o DEST*
+``**usage: client.py [-h] [-r] -n NUM -i INTERVAL -c CONNECTION -f SRC -o DEST**
 
 optional arguments:
   -h, --help            show this help message and exit
